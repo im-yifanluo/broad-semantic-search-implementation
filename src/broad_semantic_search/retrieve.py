@@ -43,36 +43,37 @@ async def retrieve_for_query(
     """
     hits = []
     
-    # Run both searches in parallel
+    # Run searches sequentially to avoid rate limiting
     try:
-        semantic_results, keyword_results = await asyncio.gather(
-            s2_client.semantic_search(query, limit=limit_per_source),
-            s2_client.keyword_search(query, limit=limit_per_source),
-            return_exceptions=True,
-        )
+        semantic_results = await s2_client.semantic_search(query, limit=limit_per_source)
     except Exception as e:
-        logger.error(f"Retrieval failed for query {query!r}: {e}")
-        return hits
+        logger.warning(f"Semantic search failed: {e}")
+        semantic_results = []
+    
+    # Delay between search types to avoid rate limiting
+    await asyncio.sleep(2.0)
+    
+    try:
+        keyword_results = await s2_client.keyword_search(query, limit=limit_per_source)
+    except Exception as e:
+        logger.warning(f"Keyword search failed: {e}")
+        keyword_results = []
     
     # Process semantic results
-    if isinstance(semantic_results, list):
-        for s2paper in semantic_results:
-            paper = s2_to_paper(s2paper)
-            paper.queries.append(query)
-            hits.append(RetrievalHit(paper=paper, query=query, source="semantic"))
+    for s2paper in semantic_results:
+        paper = s2_to_paper(s2paper)
+        paper.queries.append(query)
+        hits.append(RetrievalHit(paper=paper, query=query, source="semantic"))
+    if semantic_results:
         logger.info(f"Semantic search for {query!r}: {len(semantic_results)} papers")
-    else:
-        logger.warning(f"Semantic search failed: {semantic_results}")
     
     # Process keyword results
-    if isinstance(keyword_results, list):
-        for s2paper in keyword_results:
-            paper = s2_to_paper(s2paper)
-            paper.queries.append(query)
-            hits.append(RetrievalHit(paper=paper, query=query, source="keyword"))
+    for s2paper in keyword_results:
+        paper = s2_to_paper(s2paper)
+        paper.queries.append(query)
+        hits.append(RetrievalHit(paper=paper, query=query, source="keyword"))
+    if keyword_results:
         logger.info(f"Keyword search for {query!r}: {len(keyword_results)} papers")
-    else:
-        logger.warning(f"Keyword search failed: {keyword_results}")
     
     return hits
 
@@ -81,15 +82,22 @@ async def run_retrieval(
     queries: list[str],
     s2_client: S2Client,
     limit_per_source: int = 10,
+    delay_seconds: float = 3.0,
 ) -> list[RetrievalHit]:
     """
     Run hybrid retrieval for all queries.
     Returns all hits (not yet deduplicated).
+    
+    Args:
+        delay_seconds: Delay between queries to avoid rate limiting (default 3s for public API).
     """
     all_hits = []
     
-    # Run queries sequentially to avoid rate limiting
-    for query in queries:
+    # Run queries sequentially with delay to avoid rate limiting
+    for i, query in enumerate(queries):
+        if i > 0:
+            await asyncio.sleep(delay_seconds)
+            logger.info(f"Processing query {i+1}/{len(queries)}: {query!r}")
         hits = await retrieve_for_query(query, s2_client, limit_per_source)
         all_hits.extend(hits)
     
